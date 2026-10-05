@@ -118,7 +118,7 @@ flowchart TD
     Q([query]) --> BM25["BM25\nsearch_vector @@ websearch_to_tsquery"]
     Q --> EMB["ONNX embed\nparaphrase-multilingual-MiniLM-L12-v2 · 384d · local"]
     EMB --> KNN["KNN\nembedding <=> query_vector\ncosine distance"]
-    BM25 --> RRF["RRF fusion\nscore = 1/(k+rank_bm25) + 1/(k+rank_vec)\nk=60"]
+    BM25 --> RRF["Weighted RRF\nw_fts/(k+rank_fts) + w_vec/(k+rank_vec)\n+ title boost · default k=20"]
     KNN --> RRF
     RRF --> R([top-N results])
 ```
@@ -157,6 +157,25 @@ uv run python scripts/reembed.py
 
 Changing `MEMLORD_EMBEDDING_DIM` requires a new migration (the pgvector column
 size is fixed).
+
+### Hybrid fusion tuning
+
+Search merges FTS + vector ranks with **weighted Reciprocal Rank Fusion**, then
+adds a small title boost. All knobs are `MEMLORD_*` env vars (see `.env.example`).
+
+| Knob | Default | Notes |
+|------|---------|-------|
+| `MEMLORD_RRF_K` | `20` | Lower → steeper rank gaps. `20` is a solid default for personal and mid-size stores; raise toward `40–60` if a very large corpus produces too many near-ties. |
+| `MEMLORD_FUSION_W_VEC` | `1.0` | Weight on the vector leg. |
+| `MEMLORD_FUSION_W_FTS_LOCAL` | `1.0` | FTS weight when using the local 384-d vectors. |
+| `MEMLORD_FUSION_W_FTS_REMOTE` | `0.5` | FTS weight when remote embeddings drive vector search (reduces keyword dilution of strong semantic hits). Raise toward `1.0` if exact keyword/title recall matters more than paraphrase. |
+| `MEMLORD_FTS_WEAK_RATIO` | `0.3` | FTS hits with `ts_rank < ratio × max(ts_rank)` contribute **no** FTS score (they can still appear via vector/title). Lower if weak keyword matches should still count. |
+| `MEMLORD_EXACT_NAME_BOOST` / `MEMLORD_PARTIAL_NAME_BOOST` | `1.0` / `0.025` | Added after RRF. Keep partial boost well below a single-path rank-1 score (`≈1/(k+1)`). |
+| `MEMLORD_SEARCH_DEBUG` | `false` | When true, results include `score_fts` / `score_vec` / `score_name`. |
+
+These defaults are meant to be **corpus-size agnostic**: they do not assume a
+fixed number of memories. Tune from observed ranking quality, not from a
+hard-coded library size.
 
 
 | Variable                   | Default                                                    | Description                                       |

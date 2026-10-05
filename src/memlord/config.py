@@ -21,10 +21,24 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     base_url: str = "http://localhost:8000"
-    rrf_k: int = 60
+    # Reciprocal Rank Fusion constant. Lower k → steeper rank gaps (default 20).
+    rrf_k: int = Field(20, ge=1)
     default_limit: int = 10
     sim_threshold: float = Field(0.25, ge=0.0, le=1.0)
     dedup_threshold: float = Field(0.85, ge=0.0, le=1.0)
+    # Hybrid fusion weights. When remote embeddings drive vector search,
+    # FTS weight is reduced so keyword noise dilutes semantic ranks less.
+    fusion_w_vec: float = Field(1.0, ge=0.0)
+    fusion_w_fts_local: float = Field(1.0, ge=0.0)
+    fusion_w_fts_remote: float = Field(0.5, ge=0.0)
+    # Drop FTS contribution when ts_rank < ratio * max(ts_rank) in the result set.
+    fts_weak_ratio: float = Field(0.3, ge=0.0, le=1.0)
+    # Title boosts added after weighted RRF. Partial boost should stay well
+    # below a single-path rank-1 score (≈1/(k+1)); with k=20 that is ~0.048.
+    exact_name_boost: float = Field(1.0, ge=0.0)
+    partial_name_boost: float = Field(0.025, ge=0.0)
+    # When true, SearchResult includes per-component score breakdown.
+    search_debug: bool = False
     oauth_jwt_secret: str = "memlord-dev-secret-please-change"
     # Self-registration (web UI + OAuth register form). Disabled by default;
     # set MEMLORD_ALLOW_REGISTRATION=true to enable.

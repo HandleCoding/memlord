@@ -3,9 +3,13 @@
 - FTS uses the 'chinese' text search config (zhparser) instead of 'simple'.
 - Query terms are OR-combined (single-char CJK terms dropped when longer terms exist).
 - search_vector = setweight(name,'A') || setweight(content,'B'); ts_rank weights title higher.
+- Weighted RRF fusion: vector weight always on; FTS weight lower when remote embeddings
+  drive the vector leg. Weak FTS hits (ts_rank << max) contribute no FTS score.
 - Title boost applied after RRF fusion (exact name match >> partial name match).
 - Each SearchResult carries a ~160-char snippet centred on the first matched term.
 """
+
+from __future__ import annotations
 
 import logging
 import re
@@ -27,8 +31,6 @@ TS_CONFIG = "chinese"
 logger = logging.getLogger(__name__)
 
 SNIPPET_LEN = 160
-EXACT_NAME_BOOST = 1.0
-PARTIAL_NAME_BOOST = 0.02
 
 _LEXEME_RE = re.compile(r"'((?:[^']|'')*)'")
 _CJK_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
@@ -40,6 +42,43 @@ def _norm(s: str) -> str:
 
 def _is_single_cjk(term: str) -> bool:
     return len(term) == 1 and bool(_CJK_RE.match(term))
+
+
+def strong_fts_ids(ts_ranks: dict[int, float], ratio: float) -> set[int]:
+    """Keep docs whose ts_rank is at least ``ratio * max(ts_rank)``.
+
+    Weak keyword hits stay as candidates via other legs but get no FTS RRF score.
+    """
+    if not ts_ranks:
+        return set()
+    max_ts = max(ts_ranks.values())
+    if max_ts <= 0:
+        return set(ts_ranks)
+    floor = ratio * max_ts
+    return {doc_id for doc_id, rank in ts_ranks.items() if rank >= floor}
+
+
+def fuse_rrf(
+    *,
+    doc_ids: set[int],
+    bm25_ranks: dict[int, int],
+    vec_ranks: dict[int, int],
+    name_boost: dict[int, float],
+    k: int,
+    w_fts: float,
+    w_vec: float,
+) -> dict[int, tuple[float, float, float, float]]:
+    """Weighted RRF + title boost.
+
+    Returns ``doc_id -> (total, score_fts, score_vec, score_name)``.
+    """
+    out: dict[int, tuple[float, float, float, float]] = {}
+    for doc_id in doc_ids:
+        score_fts = (w_fts / (k + bm25_ranks[doc_id])) if doc_id in bm25_ranks else 0.0
+        score_vec = (w_vec / (k + vec_ranks[doc_id])) if doc_id in vec_ranks else 0.0
+        score_name = name_boost.get(doc_id, 0.0)
+        out[doc_id] = (score_fts + score_vec + score_name, score_fts, score_vec, score_name)
+    return out
 
 
 async def _query_terms(session: AsyncSession, query: str) -> list[str]:
@@ -123,7 +162,7 @@ async def hybrid_search(
     bm25_rows = []
     if terms:
         tsquery = cast(literal(_or_tsquery_text(terms)), TSQUERY)
-        ts_rank_expr = func.ts_rank(Memory.search_vector, tsquery)
+        ts_rank_expr = func.ts_rank(Memory.search_vector, tsquery).label("ts_rank")
         bm25_rank = func.row_number().over(order_by=ts_rank_expr.desc()).label("bm25_rank")
 
         tag_match = (
@@ -137,7 +176,7 @@ async def hybrid_search(
         )
 
         bm25_q = (
-            select(*cols, bm25_rank)
+            select(*cols, ts_rank_expr, bm25_rank)
             .join(Workspace, Memory.workspace_id == Workspace.id)
             .where(
                 (Memory.search_vector.op("@@")(tsquery)) | tag_match,
@@ -175,6 +214,7 @@ async def hybrid_search(
     emb_col = Memory.embedding
     vec_dim = LOCAL_EMBEDDING_DIM
     vector: list[float] | None = None
+    using_remote_vec = False
 
     if settings.remote_embedding_configured:
         total = await session.scalar(select(func.count()).select_from(Memory).where(*conditions))
@@ -189,6 +229,7 @@ async def hybrid_search(
                 vector = await embed_remote(query)
                 emb_col = Memory.embedding_remote
                 vec_dim = settings.embedding_dim
+                using_remote_vec = True
             except Exception as exc:
                 logger.warning("remote query embedding failed, falling back to local: %s", exc)
 
@@ -196,6 +237,7 @@ async def hybrid_search(
         vector = await embed_local(query)
         emb_col = Memory.embedding
         vec_dim = LOCAL_EMBEDDING_DIM
+        using_remote_vec = False
 
     vec_param = bindparam("vec", type_=Vector(vec_dim))
     distance = emb_col.op("<=>", return_type=Float)(vec_param).label("distance")
@@ -210,8 +252,17 @@ async def hybrid_search(
     )
     vec_rows = (await session.execute(vec_q, {"vec": vector})).fetchall()
 
-    # Build rank maps
-    bm25_ranks: dict[int, int] = {row.id: row.bm25_rank for row in bm25_rows}
+    # Raw FTS ranks + weak-hit gate (weak hits stay candidates, no FTS score)
+    ts_ranks: dict[int, float] = {
+        row.id: float(row.ts_rank) if row.ts_rank is not None else 0.0 for row in bm25_rows
+    }
+    strong_ids = strong_fts_ids(ts_ranks, settings.fts_weak_ratio)
+    # Re-rank only strong FTS hits for RRF contribution (preserve relative order).
+    strong_ordered = [row.id for row in bm25_rows if row.id in strong_ids]
+    bm25_ranks: dict[int, int] = {doc_id: i + 1 for i, doc_id in enumerate(strong_ordered)}
+    # Any FTS hit (including weak) still counts as a text signal for threshold bypass.
+    fts_hit_ids = set(ts_ranks)
+
     vec_ranks: dict[int, int] = {row.id: row.vec_rank for row in vec_rows}
     vec_distances: dict[int, float] = {row.id: row.distance for row in vec_rows}
     contents: dict[int, tuple[str, str, MemoryType, str, int]] = {}
@@ -232,20 +283,28 @@ async def hybrid_search(
         if not qn or len(nn) < 2:
             continue
         if nn == qn:
-            name_boost[doc_id] = EXACT_NAME_BOOST
+            name_boost[doc_id] = settings.exact_name_boost
         elif qn in nn or nn in qn:
-            name_boost[doc_id] = PARTIAL_NAME_BOOST
+            name_boost[doc_id] = settings.partial_name_boost
 
-    # RRF fusion + title boost
-    all_ids = set(bm25_ranks) | set(vec_ranks) | set(name_boost)
+    w_fts = settings.fusion_w_fts_remote if using_remote_vec else settings.fusion_w_fts_local
+    w_vec = settings.fusion_w_vec
+
+    all_ids = set(fts_hit_ids) | set(vec_ranks) | set(name_boost)
+    fused = fuse_rrf(
+        doc_ids=all_ids,
+        bm25_ranks=bm25_ranks,
+        vec_ranks=vec_ranks,
+        name_boost=name_boost,
+        k=k,
+        w_fts=w_fts,
+        w_vec=w_vec,
+    )
+
+    debug = settings.search_debug
     scored: list[SearchResult] = []
     for doc_id in all_ids:
-        rrf = 0.0
-        if doc_id in bm25_ranks:
-            rrf += 1.0 / (k + bm25_ranks[doc_id])
-        if doc_id in vec_ranks:
-            rrf += 1.0 / (k + vec_ranks[doc_id])
-        rrf += name_boost.get(doc_id, 0.0)
+        total, score_fts, score_vec, score_name = fused[doc_id]
 
         distance = vec_distances.get(doc_id)
         # pgvector <=> is cosine distance: similarity = 1 - distance
@@ -254,7 +313,7 @@ async def hybrid_search(
         # Text/tag/title hits are always included; threshold only filters pure vec
         # matches that lack any text/tag/title signal.
         if (
-            doc_id not in bm25_ranks
+            doc_id not in fts_hit_ids
             and doc_id not in name_boost
             and similarity is not None
             and similarity < threshold
@@ -270,9 +329,12 @@ async def hybrid_search(
                 memory_type=memory_type,  # type: ignore[arg-type]
                 workspace=workspace,
                 workspace_id=workspace_id,
-                rrf_score=rrf,
+                rrf_score=total,
                 vec_similarity=similarity,
                 snippet=make_snippet(content, terms),
+                score_fts=score_fts if debug else None,
+                score_vec=score_vec if debug else None,
+                score_name=score_name if debug else None,
             )
         )
 
