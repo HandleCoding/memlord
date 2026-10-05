@@ -153,5 +153,5 @@ jobs:
           build-args: VERSION=${{ steps.version.outputs.value }}
           cache-from: |
             type=gha
-            type=registry,ref=ghcr.io/${{ github.repository }}:latest
+            type=registry,ref=${{ env.IMAGE }}:latest
           cache-to: type=gha,mode=max
