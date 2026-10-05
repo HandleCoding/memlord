@@ -22,6 +22,9 @@ class Memory(Base):
         sa.DateTime(timezone=False), server_default=sa.func.now(), nullable=False
     )
     expires_at = sa.Column(sa.DateTime(timezone=False), nullable=True)
+    # Optimistic-lock counter: bumped by every successful update/move; writers
+    # pass it back as expected_revision (compare-and-swap in the UPDATE WHERE).
+    revision = sa.Column(sa.Integer, nullable=False, server_default="1")
     workspace_id = sa.Column(
         sa.Integer,
         sa.ForeignKey("workspaces.id", ondelete="CASCADE"),

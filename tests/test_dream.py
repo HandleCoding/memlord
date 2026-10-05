@@ -17,12 +17,13 @@ async def _store(
     mid, _ = await MemoryDao(s, uid).create(
         content=content,
         memory_type=MemoryType.fact,
-        metadata={},
+        metadata={"source": "test"},
         tags=set(),
         name=content[:60].strip(),
         workspace_id=workspace_id,
         force=True,
         expires_at=expires_at,
+        policy_version=1,
     )
     return mid
 

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from memlord.config import settings
+from memlord.dao.policy import PolicyDao, PolicyError, require_or_log
 from memlord.dao.workspace import WorkspaceDao
 from memlord.embeddings import embed_pair
 from memlord.filters import not_expired
@@ -29,6 +30,7 @@ class MemoryDao:
         self._s = s
         self._uid = uid
         self._ws_dao = WorkspaceDao(s, uid)
+        self._policy = PolicyDao(s, uid)
 
     async def _upsert_tags(self, memory_id: int, tags: set[str]) -> None:
         for tag_name in tags:
@@ -115,12 +117,21 @@ class MemoryDao:
         workspace_id: int | None = None,
         force: bool = False,
         expires_at: datetime | None = None,
+        policy_version: int | None = None,
     ) -> tuple[int, bool]:
         if workspace_id is None:
             workspace_id = await self._personal_workspace_id()
         else:
             if not await self._ws_dao.can_write(workspace_id):
                 raise ValueError(f"No write access to workspace {workspace_id!r}")
+
+        await self._policy.check_write(workspace_id, policy_version)
+        source = (metadata or {}).get("source")
+        require_or_log(
+            isinstance(source, str) and bool(source.strip()),
+            "source_required",
+            "Pass source (stored as metadata.source): where this information came from",
+        )
 
         memory_id = await self._s.scalar(
             select(Memory.id).where(
@@ -167,13 +178,27 @@ class MemoryDao:
         tags: set[str] = _UNSET,  # type: ignore[assignment]
         name: str | None = _UNSET,  # type: ignore[assignment]
         expires_at: datetime | None = _UNSET,  # type: ignore[assignment]
-    ) -> tuple[int, str]:
-        """Update memory fields. Pass _UNSET to leave a field unchanged."""
+        policy_version: int | None = None,
+        expected_revision: int | None = None,
+    ) -> tuple[int, str, int]:
+        """Update memory fields. Pass _UNSET to leave a field unchanged.
+
+        expected_revision is compared in the UPDATE's WHERE clause (CAS), so a
+        concurrent writer can never be silently overwritten.
+        Returns (id, name, new revision).
+        """
         if workspace_id is None:
             workspace_id = await self._personal_workspace_id()
         else:
             if not await self._ws_dao.can_write(workspace_id):
                 raise ValueError(f"No write access to workspace {workspace_id!r}")
+
+        await self._policy.check_write(workspace_id, policy_version)
+        require_or_log(
+            expected_revision is not None,
+            "expected_revision_required",
+            "Pass expected_revision (the revision returned by get_memory)",
+        )
 
         memory_id = await self._s.scalar(
             select(Memory.id).where(Memory.id == id, Memory.workspace_id == workspace_id)
@@ -206,37 +231,68 @@ class MemoryDao:
             values["embedding"] = pair.local
             values["embedding_remote"] = pair.remote
 
-        if values:
-            final_name: str = await self._s.scalar(  # type: ignore[assignment]
-                update(Memory).where(Memory.id == memory_id).values(**values).returning(Memory.name)
+        q = update(Memory).where(Memory.id == memory_id, Memory.workspace_id == workspace_id)
+        if expected_revision is not None:
+            q = q.where(Memory.revision == expected_revision)
+        row = (
+            await self._s.execute(
+                q.values(**values, revision=Memory.revision + 1).returning(
+                    Memory.name, Memory.revision
+                )
             )
-        else:
-            final_name = await self._s.scalar(  # type: ignore[assignment]
-                select(Memory.name).where(Memory.id == memory_id)
+        ).one_or_none()
+        if row is None:
+            raise PolicyError(
+                "revision_conflict",
+                f"Memory id={id} is no longer at revision {expected_revision}; "
+                "re-read it with get_memory and retry",
             )
 
         if tags is not _UNSET:
             await self._replace_tags(memory_id, tags)
 
-        return memory_id, final_name
+        return memory_id, row.name, row.revision
 
-    async def delete(self, id: int, workspace_id: int | None = None) -> None:
+    async def delete(
+        self,
+        id: int,
+        workspace_id: int | None = None,
+        policy_version: int | None = None,
+        expected_revision: int | None = None,
+    ) -> None:
+        """Hard-delete a memory. expected_revision is checked in the DELETE's WHERE (CAS).
+
+        A matching revision only proves the caller saw the latest version; it is not
+        user consent to delete.
+        """
         if workspace_id is None:
             workspace_id = await self._personal_workspace_id()
         else:
             if not await self._ws_dao.can_write(workspace_id):
                 raise ValueError(f"No write access to workspace {workspace_id!r}")
 
-        result = await self._s.scalar(
-            delete(Memory)
-            .where(
-                Memory.id == id,
-                Memory.workspace_id == workspace_id,
-            )
-            .returning(Memory.id)
+        await self._policy.check_write(workspace_id, policy_version)
+        require_or_log(
+            expected_revision is not None,
+            "expected_revision_required",
+            "Pass expected_revision (the revision returned by get_memory)",
         )
+
+        q = delete(Memory).where(Memory.id == id, Memory.workspace_id == workspace_id)
+        if expected_revision is not None:
+            q = q.where(Memory.revision == expected_revision)
+        result = await self._s.scalar(q.returning(Memory.id))
         if result is None:
-            raise ValueError(f"Memory with id={id} not found")
+            exists = await self._s.scalar(
+                select(Memory.id).where(Memory.id == id, Memory.workspace_id == workspace_id)
+            )
+            if exists is None:
+                raise ValueError(f"Memory with id={id} not found")
+            raise PolicyError(
+                "revision_conflict",
+                f"Memory id={id} is no longer at revision {expected_revision}; "
+                "re-read it with get_memory before deleting",
+            )
         await self._cleanup_orphan_tags()
 
     async def get(
@@ -265,6 +321,7 @@ class MemoryDao:
             Memory.created_at,
             Memory.expires_at,
             Memory.workspace_id,
+            Memory.revision,
         ).where(Memory.workspace_id == workspace_id)
         if id is not None:
             q = q.where(Memory.id == id)
@@ -278,13 +335,34 @@ class MemoryDao:
         tags = (await self.fetch_tags([memory_id])).get(memory_id, set())
         return MemoryListItem(**row, tags=tags)
 
-    async def move(self, id: int, from_workspace_id: int, to_workspace_id: int) -> None:
-        """Move memory to a different workspace. Raises ValueError if not found or duplicate."""
+    async def move(
+        self,
+        id: int,
+        from_workspace_id: int,
+        to_workspace_id: int,
+        expected_revision: int | None = None,
+    ) -> int:
+        """Move memory to a different workspace. Raises ValueError if not found or duplicate.
+
+        Policy P0: refused while MEMLORD_POLICY_ENFORCE is on, because source and
+        target are governed by different policies (equal version numbers do not
+        mean equal rules). Store a copy in the target and delete the original.
+        In transition mode the legacy move runs, with CAS on expected_revision.
+        Returns the new revision.
+        """
         workspace_ids = await self._accessible_workspace_ids(write=True)
         if to_workspace_id not in workspace_ids:
             raise PermissionError(f"No access to workspace {to_workspace_id}")
         if from_workspace_id not in workspace_ids:
             raise PermissionError(f"No access to workspace {from_workspace_id}")
+        if to_workspace_id == from_workspace_id:
+            raise ValueError("Memory is already in that workspace")
+        require_or_log(
+            False,
+            "cross_workspace_move_disabled",
+            "Moving between workspaces is disabled by policy; store a copy in the "
+            "target workspace (with its policy_version) and delete the original",
+        )
 
         q = select(Memory.id, Memory.name, Memory.content).where(
             Memory.id == id, Memory.workspace_id == from_workspace_id
@@ -309,9 +387,20 @@ class MemoryDao:
                 "A memory with the same content or name already exists in the target workspace"
             )
 
-        await self._s.execute(
-            update(Memory).where(Memory.id == id).values(workspace_id=to_workspace_id)
+        q = update(Memory).where(Memory.id == id, Memory.workspace_id == from_workspace_id)
+        if expected_revision is not None:
+            q = q.where(Memory.revision == expected_revision)
+        revision = await self._s.scalar(
+            q.values(workspace_id=to_workspace_id, revision=Memory.revision + 1).returning(
+                Memory.revision
+            )
         )
+        if revision is None:
+            raise PolicyError(
+                "revision_conflict",
+                f"Memory id={id} is no longer at revision {expected_revision}; re-read and retry",
+            )
+        return revision
 
     async def fetch_tags(self, memory_ids: list[int]) -> dict[int, set[str]]:
         rows = await self._s.execute(

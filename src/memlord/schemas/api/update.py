@@ -11,3 +11,7 @@ class UpdateMemoryRequest(Schema):
     tags: set[str] | None = None
     metadata: dict | None = None
     expires_at: datetime | None = None
+    # Policy P0: optional at the schema level so MEMLORD_POLICY_ENFORCE=0 still
+    # reaches the DAO; the DAO decides whether a missing value is an error.
+    policy_version: int | None = None
+    expected_revision: int | None = None

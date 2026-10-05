@@ -291,8 +291,9 @@ Python 应用进程完全用不到它。把词表打进应用镜像既不生效�
 | `get_memory`      | Fetch a single memory by name with full content (expired included)      |
 | `update_memory`   | Update content, type, tags, metadata, or expiry by name (and optionally rename) |
 | `delete_memory`   | Delete by name                                                          |
-| `move_memory`     | Move a memory to a different workspace                                  |
+| `move_memory`     | Move a memory to a different workspace (disabled while the policy is enforced) |
 | `list_workspaces` | List workspaces you are a member of (including personal)                |
+| `get_memory_policy` | Read the workspace's memory-usage policy and its current `version`    |
 | `dream_report`    | Read-only consolidation candidates: similar memory pairs, expired and expiring-soon memories |
 
 The `dream` MCP prompt walks the client LLM through a full consolidation pass over the
@@ -300,6 +301,40 @@ The `dream` MCP prompt walks the client LLM through a full consolidation pass ov
 into `insight` memories, retire superseded ones via `expires_at` — never destructively.
 
 Workspace management (create, invite, join, leave) is handled via the Web UI.
+
+### 📜 Workspace memory policy
+
+Each workspace has one memory-usage policy (`workspace_policies`, seeded with a default
+Chinese template). It is not a memory: search and list never return it.
+
+Write protocol for every client (MCP and REST/Web UI alike; checked in the DAO):
+
+1. `get_memory_policy(workspace)` → `version`, `body` (the rules), `structured`.
+2. `store_memory(..., source=..., policy_version=version)` — `source` is stored as
+   `metadata.source`; the server only checks it is non-empty, not that it is true.
+3. `update_memory` / `delete_memory(..., policy_version=version, expected_revision=revision)`
+   — `revision` comes from `get_memory` / `list_memories` / previous write responses. The
+   revision check is part of the SQL `UPDATE/DELETE ... WHERE revision = :expected`, so a
+   concurrent writer is never silently overwritten (`revision_conflict` → re-read).
+4. The write transaction takes `FOR SHARE` on the policy row; a policy update needs the row
+   lock. A policy bump therefore either waits for in-flight writes or makes them fail with
+   `policy_version_mismatch`.
+
+Errors are `"<code>: <message>"` (REST: `{"detail", "code"}`, 409 for
+`policy_version_mismatch` / `revision_conflict`, 400 otherwise). Codes:
+`policy_version_required`, `policy_version_mismatch`, `source_required`,
+`expected_revision_required`, `revision_conflict`, `cross_workspace_move_disabled`.
+
+- Cross-workspace `move_memory` is refused while enforced: store into the target with its
+  own `policy_version`, then delete the original.
+- Only a human can change a policy: Web UI → workspace page → *Memory policy*, as owner,
+  re-entering the password (and 2FA code). `/api` only accepts the web-session cookie, so
+  agents holding the owner's MCP API key / OAuth token cannot rewrite their own rules.
+- `structured.forbid_credentials` is a rule for agents. The server does **not** detect or
+  block credentials. A matching `revision` is not user consent to delete.
+- `MEMLORD_POLICY_ENFORCE` (default `true`). `false` is a transition mode: missing
+  `policy_version` / `expected_revision` / `source` are logged instead of rejected and
+  cross-workspace move works; values that are sent are still validated.
 
 ---
 

@@ -1,10 +1,18 @@
 import pytest
 
 from memlord.auth import hash_password
+from memlord.config import settings
 from memlord.dao import MemoryDao
 from memlord.dao.user import UserDao
 from memlord.dao.workspace import WorkspaceDao
 from memlord.schemas import MemoryType
+
+
+@pytest.fixture(autouse=True)
+def _transition_mode(monkeypatch):
+    # Cross-workspace move only exists in transition mode (MEMLORD_POLICY_ENFORCE=0);
+    # with enforcement on it is refused (see test_policy.py).
+    monkeypatch.setattr(settings, "policy_enforce", False)
 
 
 @pytest.fixture

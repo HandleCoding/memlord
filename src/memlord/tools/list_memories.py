@@ -23,6 +23,7 @@ _COLS = (
     Memory.extra_data.label("metadata"),
     Memory.created_at,
     Memory.expires_at,
+    Memory.revision,
     Workspace.name.label("workspace"),
 )
 

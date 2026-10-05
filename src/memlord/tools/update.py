@@ -31,6 +31,12 @@ async def update_memory(
     expires_at: datetime | None = Field(
         None, description="Set or extend the UTC expiry. Omit to leave unchanged."
     ),
+    policy_version: int | None = Field(
+        None, description="Current version from get_memory_policy (required when enforced)."
+    ),
+    expected_revision: int | None = Field(
+        None, description="revision from get_memory/list_memories; write fails if it changed."
+    ),
     s: AsyncSession = MCPSessionDep,  # type: ignore[assignment]
     uid: int = MCPUserDep,  # type: ignore[assignment]
 ) -> StoreResult:
@@ -39,6 +45,9 @@ async def update_memory(
     new_name: rename the memory to this name.
     workspace: disambiguate if the name exists in multiple workspaces.
     expires_at: set or extend the UTC expiry; omit to leave it unchanged.
+
+    Policy: pass policy_version (get_memory_policy) and expected_revision (get_memory).
+    On revision_conflict re-read the memory instead of overwriting.
     """
     ws_id: int | None = None
     if workspace is not None:
@@ -55,6 +64,8 @@ async def update_memory(
         "id": item.id,
         "workspace_id": item.workspace_id,
         "memory_type": MemoryType(memory_type),
+        "policy_version": policy_version,
+        "expected_revision": expected_revision,
     }
 
     if content is not None:
@@ -68,5 +79,5 @@ async def update_memory(
     if expires_at is not None:
         data["expires_at"] = expires_at
 
-    _, final_name = await dao.update(**data)
-    return StoreResult(name=final_name, created=False)
+    _, final_name, revision = await dao.update(**data)
+    return StoreResult(name=final_name, created=False, revision=revision)

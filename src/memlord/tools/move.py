@@ -1,5 +1,6 @@
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from memlord.auth import MCPUserDep
@@ -19,6 +20,9 @@ async def move_memory(
     name: str,
     to_workspace: str,
     from_workspace: str | None = None,
+    expected_revision: int | None = Field(
+        None, description="revision from get_memory/list_memories; write fails if it changed."
+    ),
     s: AsyncSession = MCPSessionDep,  # type: ignore[assignment]
     uid: int = MCPUserDep,  # type: ignore[assignment]
 ) -> StoreResult:
@@ -27,6 +31,9 @@ async def move_memory(
     name: name of the memory to move.
     workspace: name of the target workspace (must be a member with write access).
     from_workspace: disambiguate source if the name exists in multiple workspaces.
+
+    Disabled while the memory policy is enforced (source and target workspaces have
+    separate policies): store_memory into the target, then delete_memory the original.
     """
     ws_dao = WorkspaceDao(s, uid)
     from_ws_id: int | None = None
@@ -48,5 +55,5 @@ async def move_memory(
     if ws is None:
         raise ValueError(f"Workspace {to_workspace!r} not found")
 
-    await dao.move(memory_id, from_ws_id, ws.id)
-    return StoreResult(name=name, created=False)
+    revision = await dao.move(memory_id, from_ws_id, ws.id, expected_revision=expected_revision)
+    return StoreResult(name=name, created=False, revision=revision)

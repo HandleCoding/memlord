@@ -50,4 +50,5 @@ async def get_memory(
         created_at=item.created_at,
         expires_at=item.expires_at,
         workspace=ws_name,
+        revision=item.revision,
     )

@@ -1,11 +1,13 @@
 import json
 import logging
 
-from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+import pyotp
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from memlord.dao import MemoryDao
+from memlord.dao import MemoryDao, PolicyDao
+from memlord.dao.user import UserDao
 from memlord.dao.workspace import WorkspaceDao
 from memlord.db import APISessionDep
 from memlord.models import Memory
@@ -14,7 +16,9 @@ from memlord.schemas import (
     DescriptionRequest,
     InviteRequest,
     InviteResponse,
+    PolicyInfo,
     RenameRequest,
+    UpdatePolicyRequest,
     WorkspaceDetailResponse,
     WorkspaceInfo,
 )
@@ -212,6 +216,7 @@ async def import_memories(
     s: APISessionDep,
     user: APIUserDep,
     file: UploadFile = File(),
+    policy_version: int | None = Form(None),
 ) -> ImportResult:
     ws_dao = WorkspaceDao(s, user.id)
     if not await ws_dao.can_write(workspace_id):
@@ -232,14 +237,19 @@ async def import_memories(
             logging.warning(f"Error {e} during import: {item}")
             skipped += 1
             continue
+        # Imported items may predate the source rule; record the import itself as source.
+        metadata = parsed.metadata
+        if not metadata.get("source"):
+            metadata = {**metadata, "source": f"web import: {file.filename}"}
         _, created = await dao.create(
             content=parsed.content,
             memory_type=parsed.memory_type,
-            metadata=parsed.metadata,
+            metadata=metadata,
             tags=parsed.tags,
             name=parsed.name,
             workspace_id=workspace_id,
             force=True,
+            policy_version=policy_version,
         )
         if created:
             imported += 1
@@ -279,3 +289,44 @@ async def create_invite(
         expires_in_hours=body.expires_in_hours,
         role=body.role,
     )
+
+
+@router.get("/{workspace_id}/policy", response_model=PolicyInfo)
+async def get_policy(
+    workspace_id: int,
+    s: APISessionDep,
+    user: APIUserDep,
+) -> PolicyInfo:
+    try:
+        return await PolicyDao(s, user.id).get(workspace_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail="Workspace not found") from e
+
+
+@router.put("/{workspace_id}/policy", response_model=PolicyInfo)
+async def update_policy(
+    workspace_id: int,
+    s: APISessionDep,
+    user: APIUserDep,
+    body: UpdatePolicyRequest,
+) -> PolicyInfo:
+    """Policy management is a human action, separate from agent credentials.
+
+    /api only accepts the web-session cookie (MCP API keys / OAuth tokens are not
+    accepted here), and the owner must re-enter the password (+ TOTP when enabled),
+    so an agent acting with the owner's MCP credentials cannot rewrite its own rules.
+    """
+    user_dao = UserDao(s)
+    if await user_dao.authenticate(user.email, body.current_password) is None:
+        raise HTTPException(status_code=403, detail="Password is incorrect")
+    if user.totp_enabled:
+        secret = await user_dao.get_totp_secret(user.id)
+        code = (body.totp_code or "").strip()
+        if secret is None or not pyotp.TOTP(secret).verify(code, valid_window=1):
+            raise HTTPException(status_code=403, detail="Invalid authentication code")
+    try:
+        return await PolicyDao(s, user.id).update(
+            workspace_id, body.body.strip(), body.expected_version
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e

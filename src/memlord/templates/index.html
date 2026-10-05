@@ -138,7 +138,7 @@
                 </a>
                 <div class="card-actions">
                     <button class="btn btn-sm btn-danger"
-                            @click="deleteMemory(m.workspace_id, m.id)">Delete</button>
+                            @click="deleteMemory(m)">Delete</button>
                 </div>
             </div>
             <div class="card-meta">
@@ -231,10 +231,13 @@ function memoriesPage() {
             this.load();
         },
 
-        async deleteMemory(wsId, id) {
+        async deleteMemory(m) {
             if (!confirm('Delete this memory?')) return;
-            const r = await fetch('/api/memories/' + wsId + '/' + id, { method: 'DELETE' });
-            if (r.ok) this.memories = this.memories.filter(m => m.id !== id);
+            const q = new URLSearchParams({ policy_version: m.policy_version, expected_revision: m.revision });
+            const r = await fetch('/api/memories/' + m.workspace_id + '/' + m.id + '?' + q, { method: 'DELETE' });
+            if (r.ok) { this.memories = this.memories.filter(x => x.id !== m.id); return; }
+            if (r.status === 409) alert('This memory or the workspace policy changed since the list was loaded. Reload the page and try again.');
+            else { try { alert((await r.json()).detail || 'Delete failed.'); } catch { alert('Delete failed.'); } }
         },
 
         goToPage(p) {

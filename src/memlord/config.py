@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # Self-registration (web UI + OAuth register form). Disabled by default;
     # set MEMLORD_ALLOW_REGISTRATION=true to enable.
     allow_registration: bool = False
+    # Workspace memory policy (P0). When true, every memory write must carry the
+    # current policy_version (+ expected_revision for update/delete, source for
+    # store). When false, missing fields are only logged (transition mode);
+    # values that ARE sent are still validated.
+    policy_enforce: bool = True
 
     smtp_host: str | None = None
     smtp_port: int = 587

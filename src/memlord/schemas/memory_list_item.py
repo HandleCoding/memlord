@@ -16,6 +16,7 @@ class MemoryListItem(Schema):
     created_at: NaiveDatetime
     expires_at: NaiveDatetime | None = None
     workspace_id: int
+    revision: int = 1
 
     @field_serializer("created_at")
     def serialize_created_at(self, v: datetime) -> str:

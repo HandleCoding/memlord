@@ -35,6 +35,8 @@ class MemoryItem(Schema):
     workspace_id: int | None
     workspace_name: str | None
     tags: list[str]
+    revision: int
+    policy_version: int | None = None
 
     @field_serializer("created_at", "expires_at")
     def _serialize_ts(self, v: datetime | None) -> str | None:
@@ -53,6 +55,8 @@ class MemoryDetail(Schema):
     tags: list[str]
     metadata: dict | None
     writable_workspaces: list[WorkspaceSimple]
+    revision: int
+    policy_version: int | None = None
 
     @field_serializer("created_at", "expires_at")
     def _serialize_ts(self, v: datetime | None) -> str | None:
@@ -64,3 +68,4 @@ class MemoriesResponse(Paginated[MemoryItem]): ...
 
 class MoveRequest(Schema):
     to_workspace_id: int
+    expected_revision: int | None = None

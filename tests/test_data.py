@@ -8,19 +8,20 @@ async def test_export_import(api_client, workspace_id):
             "memory_type": "fact",
             "name": "imported fact",
             "tags": ["x"],
-            "metadata": {},
+            "metadata": {"source": "test"},
         },
         {
             "content": "imported pref",
             "memory_type": "preference",
             "name": "imported pref",
             "tags": [],
-            "metadata": {"n": 1},
+            "metadata": {"n": 1, "source": "test"},
         },
     ]
     resp = await api_client.post(
         f"/api/workspaces/{workspace_id}/import",
         files={"file": ("m.json", json.dumps(items).encode(), "application/json")},
+        data={"policy_version": "1"},
     )
     assert resp.status_code == 200
     result = resp.json()

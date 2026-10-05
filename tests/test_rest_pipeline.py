@@ -24,6 +24,7 @@ async def test_pipeline(api_client, workspace_id):
     resp = await api_client.post(
         f"/api/workspaces/{workspace_id}/import",
         files={"file": ("m.json", json.dumps(items).encode(), "application/json")},
+        data={"policy_version": "1"},
     )
     assert resp.status_code == 200
     assert resp.json()["imported"] == 1
@@ -57,7 +58,10 @@ async def test_pipeline(api_client, workspace_id):
     assert resp.status_code == 200
     detail = resp.json()
     assert detail["content"] == "rest pipeline memory"
-    assert not detail["metadata"]
+    # import records itself as the source when the item has none
+    assert detail["metadata"] == {"source": "web import: m.json"}
+    assert detail["revision"] == 1
+    assert detail["policy_version"] == 1
     assert sorted(detail["tags"]) == ["pipeline", "rest"]
 
     # --- update ---
@@ -68,6 +72,8 @@ async def test_pipeline(api_client, workspace_id):
             "memory_type": "preference",
             "tags": ["rest", "updated"],
             "metadata": {"v": 1},
+            "policy_version": 1,
+            "expected_revision": 1,
         },
     )
     assert resp.status_code == 200
@@ -76,6 +82,7 @@ async def test_pipeline(api_client, workspace_id):
     assert updated["memory_type"] == "preference"
     assert sorted(updated["tags"]) == ["rest", "updated"]
     assert updated["metadata"] == {"v": 1}
+    assert updated["revision"] == 2
 
     # --- search ---
     resp = await api_client.get("/api/search?q=updated+rest+memory")
@@ -84,7 +91,10 @@ async def test_pipeline(api_client, workspace_id):
     assert any(r["id"] == mid for r in results)
 
     # --- delete ---
-    resp = await api_client.delete(f"/api/memories/{workspace_id}/{mid}")
+    resp = await api_client.delete(
+        f"/api/memories/{workspace_id}/{mid}",
+        params={"policy_version": 1, "expected_revision": 2},
+    )
     assert resp.status_code == 204
 
     resp = await api_client.get(f"/api/memories/{workspace_id}/{mid}")

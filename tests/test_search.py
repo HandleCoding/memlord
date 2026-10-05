@@ -14,11 +14,12 @@ async def _store(s: AsyncSession, content: str, uid: int, workspace_id: int) -> 
     mid, _ = await MemoryDao(s, uid).create(
         content=content,
         memory_type=MemoryType.fact,
-        metadata={},
+        metadata={"source": "test"},
         tags=[],
         name=content[:60].strip(),
         workspace_id=workspace_id,
         force=True,
+        policy_version=1,
     )
     return mid
 
@@ -140,10 +141,11 @@ async def test_tag_search(session, user_id, workspace_id):
     await dao.create(
         "Zigbee migration plan",
         MemoryType.fact,
-        {},
+        {"source": "test"},
         ["matter", "zigbee2mqtt"],
         name="Zigbee migration plan",
         workspace_id=workspace_id,
+        policy_version=1,
     )
     results = await hybrid_search(
         session, "matter", workspace_ids=[workspace_id], similarity_threshold=0.0

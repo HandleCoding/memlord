@@ -9,3 +9,4 @@ from .schema_version import SchemaVersion
 from .tag import Tag
 from .user import User
 from .workspace import Workspace, WorkspaceInvite, WorkspaceMember
+from .workspace_policy import WorkspacePolicy
