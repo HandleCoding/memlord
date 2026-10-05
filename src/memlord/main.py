@@ -19,6 +19,14 @@ mcp_app = mcp.http_app(path="/mcp")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Warm up the ONNX embedding model so the first search is not slow.
+    try:
+        from memlord.embeddings import embed  # noqa: PLC0415 - lazy, failure must not block startup
+
+        await embed("warmup 预热")
+        logging.getLogger(__name__).info("embedding model warmed up")
+    except Exception:  # pragma: no cover
+        logging.getLogger(__name__).exception("embedding warmup failed")
     async with mcp_app.lifespan(mcp_app):
         yield
 
