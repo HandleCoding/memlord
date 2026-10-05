@@ -2,6 +2,8 @@ import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 
+from memlord.config import REMOTE_EMBEDDING_DIM
+
 from .base import Base
 
 
@@ -25,7 +27,11 @@ class Memory(Base):
         sa.ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Always populated: local ONNX paraphrase-multilingual-MiniLM-L12-v2 (384-d).
     embedding = sa.Column(Vector(384), nullable=True)
+    # Optional remote embedding (e.g. BAAI/bge-m3 via SiliconFlow). Dimension is
+    # fixed at REMOTE_EMBEDDING_DIM; changing it requires a new migration.
+    embedding_remote = sa.Column(Vector(REMOTE_EMBEDDING_DIM), nullable=True)
     search_vector = sa.Column(
         TSVECTOR,
         sa.Computed(
@@ -46,5 +52,12 @@ class Memory(Base):
             postgresql_using="hnsw",
             postgresql_with={"m": 16, "ef_construction": 64},
             postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+        sa.Index(
+            "ix_memories_embedding_remote",
+            "embedding_remote",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding_remote": "vector_cosine_ops"},
         ),
     )

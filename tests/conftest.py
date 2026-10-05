@@ -51,8 +51,25 @@ def test_db_url(worker_id):
             # Memory.search_vector uses the 'chinese' text search config, which
             # the zh_fts alembic migration normally creates. create_all skips
             # migrations, so set it up here (requires a zhparser-enabled image).
-            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS zhparser"))
-            await conn.execute(text(_CREATE_CHINESE_TS_CONFIG))
+            # zhparser is preferred (CI image); fall back to a 'chinese' config
+            # copied from 'simple' so create_all works on plain pgvector hosts.
+            has_zhparser = await conn.scalar(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'zhparser')"
+                )
+            )
+            if has_zhparser:
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS zhparser"))
+                await conn.execute(text(_CREATE_CHINESE_TS_CONFIG))
+            else:
+                await conn.execute(
+                    text(
+                        "DO $$ BEGIN "
+                        "IF NOT EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'chinese') THEN "
+                        "CREATE TEXT SEARCH CONFIGURATION chinese (COPY = simple); "
+                        "END IF; END $$;"
+                    )
+                )
             await conn.run_sync(Base.metadata.create_all)
         await engine.dispose()
 
