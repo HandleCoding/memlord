@@ -10,6 +10,7 @@ from starlette import status
 
 from memlord.api import router as api_router
 from memlord.config import settings
+from memlord.dao.policy import PolicyError
 from memlord.db import session
 from memlord.server import mcp
 from memlord.ui import router as ui_router
@@ -39,6 +40,14 @@ async def permission_error_handler(request: Request, exc: PermissionError) -> JS
     return JSONResponse(
         status_code=status.HTTP_403_FORBIDDEN,
         content={"detail": str(exc)},
+    )
+
+
+@app.exception_handler(PolicyError)
+async def policy_error_handler(request: Request, exc: PolicyError) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT if exc.is_conflict else status.HTTP_400_BAD_REQUEST,
+        content={"detail": str(exc), "code": exc.code},
     )
 
 

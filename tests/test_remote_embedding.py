@@ -103,11 +103,12 @@ async def test_store_writes_remote_when_available(session, user_id, workspace_id
         mid, created = await MemoryDao(session, user_id).create(
             content="硅基流动 bge-m3 测试记忆",
             memory_type=MemoryType.fact,
-            metadata={},
+            metadata={"source": "test"},
             tags=set(),
             name="remote-embed-smoke",
             workspace_id=workspace_id,
             force=True,
+            policy_version=1,
         )
     assert created
     row = (
@@ -132,11 +133,12 @@ async def test_store_local_only_when_remote_fails(session, user_id, workspace_id
         mid, created = await MemoryDao(session, user_id).create(
             content="远端挂了仍应写入本地向量",
             memory_type=MemoryType.fact,
-            metadata={},
+            metadata={"source": "test"},
             tags=set(),
             name="remote-fail-local-ok",
             workspace_id=workspace_id,
             force=True,
+            policy_version=1,
         )
     assert created
     row = (

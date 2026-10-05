@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from memlord.models.user import User
 from memlord.models.workspace import Workspace, WorkspaceInvite, WorkspaceMember
+from memlord.models.workspace_policy import WorkspacePolicy
+from memlord.policy_defaults import DEFAULT_POLICY_BODY, DEFAULT_POLICY_STRUCTURED
 from memlord.schemas.workspace import WorkspaceInfo, WorkspaceMemberInfo, WorkspaceRole
 from memlord.utils.dt import utcnow
 
@@ -23,6 +25,16 @@ class WorkspaceDao:
     def __init__(self, s: AsyncSession, uid: int) -> None:
         self._s = s
         self._uid = uid
+
+    async def _create_default_policy(self, workspace_id: int) -> None:
+        await self._s.execute(
+            insert(WorkspacePolicy).values(
+                workspace_id=workspace_id,
+                body=DEFAULT_POLICY_BODY,
+                structured=DEFAULT_POLICY_STRUCTURED,
+                updated_by=self._uid,
+            )
+        )
 
     async def create(self, name: str, description: str | None = None) -> WorkspaceInfo:
         workspace_id = await self._s.scalar(
@@ -41,6 +53,7 @@ class WorkspaceDao:
                 workspace_id=workspace_id, user_id=self._uid, role=WorkspaceRole.owner
             )
         )
+        await self._create_default_policy(workspace_id)
         return WorkspaceInfo(
             id=workspace_id,
             name=name,
@@ -64,6 +77,7 @@ class WorkspaceDao:
                 workspace_id=workspace_id, user_id=self._uid, role=WorkspaceRole.owner
             )
         )
+        await self._create_default_policy(workspace_id)
         return WorkspaceInfo(
             id=workspace_id,
             name=name,

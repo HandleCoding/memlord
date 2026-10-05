@@ -147,7 +147,10 @@ function memoryPage(workspaceId, memoryId) {
             const r = await fetch('/api/memories/' + this.memory.workspace_id + '/' + this.memory.id, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: this.editName, content: this.editContent, memory_type: this.editType, tags, metadata, expires_at }),
+                body: JSON.stringify({
+                    name: this.editName, content: this.editContent, memory_type: this.editType, tags, metadata, expires_at,
+                    policy_version: this.memory.policy_version, expected_revision: this.memory.revision,
+                }),
             });
             if (r.ok) {
                 this.memory = await r.json();
@@ -156,8 +159,8 @@ function memoryPage(workspaceId, memoryId) {
                 this.successMsg = 'Saved.';
                 this.errorMsg = '';
             } else {
-                const err = await r.json();
-                this.errorMsg = err.detail || 'Save failed.';
+                this.errorMsg = await this.errorText(r, 'Save failed.');
+                this.successMsg = '';
             }
         },
 
@@ -165,22 +168,32 @@ function memoryPage(workspaceId, memoryId) {
             const r = await fetch('/api/memories/' + this.memory.workspace_id + '/' + this.memory.id + '/move', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ to_workspace_id: parseInt(this.moveTarget) }),
+                body: JSON.stringify({ to_workspace_id: parseInt(this.moveTarget), expected_revision: this.memory.revision }),
             });
             if (r.ok) {
                 this.memory = await r.json();
                 this.successMsg = 'Moved.';
                 this.errorMsg = '';
             } else {
-                const err = await r.json();
-                this.errorMsg = err.detail || 'Move failed.';
+                this.errorMsg = await this.errorText(r, 'Move failed.');
+                this.successMsg = '';
             }
         },
 
         async deleteMemory() {
             if (!confirm('Delete this memory?')) return;
-            const r = await fetch('/api/memories/' + this.memory.workspace_id + '/' + this.memory.id, { method: 'DELETE' });
-            if (r.ok) window.location.href = '/';
+            const q = new URLSearchParams({ policy_version: this.memory.policy_version, expected_revision: this.memory.revision });
+            const r = await fetch('/api/memories/' + this.memory.workspace_id + '/' + this.memory.id + '?' + q, { method: 'DELETE' });
+            if (r.ok) { window.location.href = '/'; return; }
+            this.errorMsg = await this.errorText(r, 'Delete failed.');
+            this.successMsg = '';
+        },
+
+        // 409 = stale revision / policy version: never retry or overwrite automatically.
+        async errorText(r, fallback) {
+            if (r.status === 409) return 'This memory or the workspace policy changed since you opened it. Reload the page and re-apply your edits.';
+            try { const err = await r.json(); return err.detail || fallback; }
+            catch { return fallback; }
         },
     };
 }

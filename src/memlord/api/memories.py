@@ -1,8 +1,9 @@
 import sqlalchemy as sa
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from memlord.dao import MemoryDao
+from memlord.dao import MemoryDao, PolicyDao
 from memlord.dao.workspace import WorkspaceDao
 from memlord.db import APISessionDep
 from memlord.filters import not_expired
@@ -31,6 +32,7 @@ _COLS = (
     Memory.created_at,
     Memory.expires_at,
     Memory.workspace_id,
+    Memory.revision,
 )
 
 
@@ -83,6 +85,7 @@ async def list_memories(
     ids = [row["id"] for row in rows]
     tags_map = await MemoryDao(s, user.id).fetch_tags(ids)
     ws_display = {ws.id: ("Personal" if ws.is_personal else ws.name) for ws in workspaces}
+    policy_versions = await PolicyDao(s, user.id).get_versions(workspace_ids)
 
     memories = [
         MemoryItem(
@@ -95,6 +98,8 @@ async def list_memories(
             workspace_id=row["workspace_id"],
             workspace_name=ws_display.get(row["workspace_id"]) if row["workspace_id"] else None,
             tags=sorted(tags_map.get(row["id"], set())),
+            revision=row["revision"],
+            policy_version=policy_versions.get(row["workspace_id"]),
         )
         for row in rows
     ]
@@ -107,7 +112,9 @@ async def list_memories(
     )
 
 
-def _build_detail(memory: MemoryListItem, workspaces: list[WorkspaceInfo]) -> MemoryDetail:
+def _build_detail(
+    memory: MemoryListItem, workspaces: list[WorkspaceInfo], policy_version: int | None
+) -> MemoryDetail:
     ws_map = {ws.id: ("Personal" if ws.is_personal else ws.name) for ws in workspaces}
     writable = [
         WorkspaceSimple(id=ws.id, name=ws.name, is_personal=ws.is_personal)
@@ -126,7 +133,15 @@ def _build_detail(memory: MemoryListItem, workspaces: list[WorkspaceInfo]) -> Me
         tags=sorted(memory.tags),
         metadata=memory.metadata or None,
         writable_workspaces=writable,
+        revision=memory.revision,
+        policy_version=policy_version,
     )
+
+
+async def _detail_response(s: AsyncSession, uid: int, memory: MemoryListItem) -> MemoryDetail:
+    workspaces = await WorkspaceDao(s, uid).list_workspaces()
+    versions = await PolicyDao(s, uid).get_versions([memory.workspace_id])
+    return _build_detail(memory, workspaces, versions.get(memory.workspace_id))
 
 
 @router.get("/{workspace_id}/{id}", response_model=MemoryDetail)
@@ -139,8 +154,7 @@ async def get_memory(
     memory = await MemoryDao(s, user.id).get(id=id, workspace_id=workspace_id)
     if memory is None:
         raise HTTPException(status_code=404, detail="Memory not found")
-    workspaces = await WorkspaceDao(s, user.id).list_workspaces()
-    return _build_detail(memory, workspaces)
+    return await _detail_response(s, user.id, memory)
 
 
 @router.put("/{workspace_id}/{id}", response_model=MemoryDetail)
@@ -166,6 +180,8 @@ async def update_memory(
         "memory_type": new_type,
         "metadata": body.metadata,
         "tags": new_tags,
+        "policy_version": body.policy_version,
+        "expected_revision": body.expected_revision,
     }
     if new_content != existing.content:
         data["content"] = new_content
@@ -185,8 +201,7 @@ async def update_memory(
         # Only reachable if the row vanished concurrently: get() returns
         # expired memories, so a past expiry no longer hides the record.
         raise HTTPException(status_code=404, detail="Memory not found after update")
-    workspaces = await WorkspaceDao(s, user.id).list_workspaces()
-    return _build_detail(updated, workspaces)
+    return await _detail_response(s, user.id, updated)
 
 
 @router.delete("/{workspace_id}/{id}", status_code=204)
@@ -195,9 +210,16 @@ async def delete_memory(
     workspace_id: int,
     s: APISessionDep,
     user: APIUserDep,
+    policy_version: int | None = None,
+    expected_revision: int | None = None,
 ) -> None:
     try:
-        await MemoryDao(s, user.id).delete(id, workspace_id)
+        await MemoryDao(s, user.id).delete(
+            id,
+            workspace_id,
+            policy_version=policy_version,
+            expected_revision=expected_revision,
+        )
     except ValueError as e:
         raise HTTPException(status_code=404, detail="Memory not found") from e
 
@@ -216,12 +238,13 @@ async def move_memory(
         raise HTTPException(status_code=404, detail="Memory not found")
 
     try:
-        await dao.move(id, workspace_id, body.to_workspace_id)
+        await dao.move(
+            id, workspace_id, body.to_workspace_id, expected_revision=body.expected_revision
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     moved = await dao.get(id=id, workspace_id=body.to_workspace_id)
     if moved is None:
         raise HTTPException(status_code=404, detail="Memory not found after move")
-    workspaces = await WorkspaceDao(s, user.id).list_workspaces()
-    return _build_detail(moved, workspaces)
+    return await _detail_response(s, user.id, moved)

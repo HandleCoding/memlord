@@ -2,7 +2,7 @@
 {% block title %}Workspace — Memlord{% endblock %}
 {% block content %}
 
-<div x-data="workspaceDetailPage({{ workspace_id }})" x-init="init()">
+<div x-data="workspaceDetailPage({{ workspace_id }}, {{ 'true' if user.totp_enabled else 'false' }})" x-init="init()">
 
     <div class="breadcrumb">
         <a href="/ui/workspaces" class="btn btn-ghost btn-sm">← Workspaces</a>
@@ -72,6 +72,38 @@
                 </div>
             </template>
 
+            <!-- Memory policy -->
+            <template x-if="policy">
+                <div class="detail-card">
+                    <div class="section-title" x-text="'Memory policy · v' + policy.version"></div>
+                    <p style="font-size:.875rem;color:var(--text-3);margin-bottom:1rem">
+                        Rules every agent reads (get_memory_policy) before writing here. Agents must send the current
+                        version with each write, so saving a new version makes them re-read it.
+                        <span x-show="!policy.enforced">Enforcement is currently off (transition mode): missing versions are only logged.</span>
+                    </p>
+                    <template x-if="ws.role !== 'owner'">
+                        <pre class="meta-json" style="white-space:pre-wrap" x-text="policy.body"></pre>
+                    </template>
+                    <template x-if="ws.role === 'owner'">
+                        <div>
+                            <textarea class="form-textarea" x-model="editPolicy" rows="16" style="margin-bottom:.75rem"></textarea>
+                            <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+                                <input class="form-input" type="password" x-model="policyPassword"
+                                       placeholder="Your password" autocomplete="current-password" style="width:auto;flex:1">
+                                <template x-if="totpEnabled">
+                                    <input class="form-input" type="text" x-model="policyTotp" inputmode="numeric"
+                                           placeholder="2FA code" autocomplete="one-time-code" style="width:8rem">
+                                </template>
+                                <button class="btn btn-primary btn-sm" @click="savePolicy()">Save new version</button>
+                            </div>
+                            <p class="form-hint" style="margin-top:.5rem">
+                                Changing the policy requires your password, so agents using your API key or OAuth token cannot change it.
+                            </p>
+                        </div>
+                    </template>
+                </div>
+            </template>
+
             <!-- Data export/import -->
             <div class="detail-card">
                 <div class="section-title">Data</div>
@@ -135,10 +167,15 @@
 </div>
 
 <script>
-function workspaceDetailPage(workspaceId) {
+function workspaceDetailPage(workspaceId, totpEnabled) {
     const params = new URLSearchParams(window.location.search);
     return {
         ws: null,
+        policy: null,
+        editPolicy: '',
+        policyPassword: '',
+        policyTotp: '',
+        totpEnabled: totpEnabled,
         members: [],
         loading: true,
         successMsg: '',
@@ -158,7 +195,39 @@ function workspaceDetailPage(workspaceId) {
             this.members = data.members;
             this.editName = this.ws.name;
             this.editDescription = this.ws.description || '';
+            await this.loadPolicy();
             this.loading = false;
+        },
+
+        async loadPolicy() {
+            const r = await fetch('/api/workspaces/' + workspaceId + '/policy');
+            if (!r.ok) return;
+            this.policy = await r.json();
+            this.editPolicy = this.policy.body;
+        },
+
+        async savePolicy() {
+            const r = await fetch('/api/workspaces/' + workspaceId + '/policy', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    body: this.editPolicy, expected_version: this.policy.version,
+                    current_password: this.policyPassword, totp_code: this.policyTotp || null,
+                }),
+            });
+            this.policyPassword = '';
+            this.policyTotp = '';
+            if (r.ok) {
+                this.policy = await r.json();
+                this.editPolicy = this.policy.body;
+                this.successMsg = 'Policy saved as v' + this.policy.version + '.';
+                this.errorMsg = '';
+            } else if (r.status === 409) {
+                this.errorMsg = 'The policy was changed elsewhere. Reload the page (copy your edits first).';
+            } else {
+                const e = await r.json();
+                this.errorMsg = e.detail || 'Save failed.';
+            }
         },
 
         async rename() {
@@ -208,8 +277,10 @@ function workspaceDetailPage(workspaceId) {
         async importFile(event) {
             const file = event.target.files[0];
             if (!file) return;
+            await this.loadPolicy();
             const fd = new FormData();
             fd.append('file', file);
+            if (this.policy) fd.append('policy_version', this.policy.version);
             const r = await fetch('/api/workspaces/' + workspaceId + '/import', { method: 'POST', body: fd });
             if (r.ok) { this.importResult = await r.json(); this.errorMsg = ''; }
             else { const e = await r.json(); this.errorMsg = e.detail; }

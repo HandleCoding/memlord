@@ -65,6 +65,11 @@ def dream(workspace: str | None = None) -> str:
     scope = f'workspace="{workspace}"' if workspace else "all write-accessible workspaces"
     return f"""Run a memory consolidation pass ("dream") over {scope}.
 
+0. Call get_memory_policy for each workspace you will touch and follow its rules. Every
+   write below must pass that workspace's policy_version; update_memory / delete_memory
+   also need the memory's current revision as expected_revision (from get_memory), and
+   store_memory needs a source. On a conflict error, re-read instead of retrying blindly.
+
 1. Call dream_report({f'workspace="{workspace}"' if workspace else ""}) to get candidates:
    similar memory pairs, expired memories, and memories expiring soon.
 

@@ -37,12 +37,13 @@ async def _create(
     mid, _ = await MemoryDao(s, uid).create(
         content=content,
         memory_type=MemoryType.fact,
-        metadata={},
+        metadata={"source": "test"},
         tags=set(tags or set()),
         name=name,
         workspace_id=ws,
         force=force,
         expires_at=expires_at,
+        policy_version=1,
     )
     return mid
 
@@ -91,11 +92,12 @@ async def test_expired_does_not_block_near_duplicate(session, user_id, workspace
     _, created = await MemoryDao(session, user_id).create(
         content="The deploy freeze starts on Friday morning!",
         memory_type=MemoryType.fact,
-        metadata={},
+        metadata={"source": "test"},
         tags=set(),
         name="b",
         workspace_id=workspace_id,
         force=False,
+        policy_version=1,
     )
     assert created is True
 
@@ -125,7 +127,9 @@ async def test_update_clears_expiry(session, user_id, workspace_id):
     mid = await _create(session, user_id, workspace_id, "temp fact", "temp", expires_at=future)
 
     # Clearing expiry (back to never-expires) is the DAO/API path: pass expires_at=None.
-    await MemoryDao(session, user_id).update(id=mid, workspace_id=workspace_id, expires_at=None)
+    await MemoryDao(session, user_id).update(
+        id=mid, workspace_id=workspace_id, expires_at=None, policy_version=1, expected_revision=1
+    )
 
     item = await MemoryDao(session, user_id).get(name="temp", workspace_id=workspace_id)
     assert item is not None

@@ -20,6 +20,7 @@ class MemoryItem(Schema):
     created_at: NaiveDatetime
     expires_at: NaiveDatetime | None = None
     workspace: str | None = None
+    revision: int | None = None
 
     @field_serializer("created_at")
     def serialize_created_at(self, v: datetime) -> str:
@@ -41,6 +42,7 @@ class MemoryDetail(Schema):
     created_at: NaiveDatetime
     expires_at: NaiveDatetime | None = None
     workspace: str | None = None
+    revision: int = Field(description="Pass back as expected_revision to update/delete.")
 
     @field_serializer("created_at")
     def serialize_created_at(self, v: datetime) -> str:
