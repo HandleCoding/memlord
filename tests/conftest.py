@@ -19,6 +19,17 @@ from memlord.models import Base
 from memlord.server import mcp
 from memlord.ui.utils import make_session_token
 
+_CREATE_CHINESE_TS_CONFIG = """
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'chinese') THEN
+    CREATE TEXT SEARCH CONFIGURATION chinese (PARSER = zhparser);
+    ALTER TEXT SEARCH CONFIGURATION chinese
+      ADD MAPPING FOR n,v,a,i,e,l,j,t WITH simple;
+  END IF;
+END $$;
+"""
+
 
 @pytest.fixture(scope="session")
 def test_db_url(worker_id):
@@ -37,6 +48,11 @@ def test_db_url(worker_id):
         engine = create_async_engine(url.set(database=test_db_name))
         async with engine.begin() as conn:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            # Memory.search_vector uses the 'chinese' text search config, which
+            # the zh_fts alembic migration normally creates. create_all skips
+            # migrations, so set it up here (requires a zhparser-enabled image).
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS zhparser"))
+            await conn.execute(text(_CREATE_CHINESE_TS_CONFIG))
             await conn.run_sync(Base.metadata.create_all)
         await engine.dispose()
 
