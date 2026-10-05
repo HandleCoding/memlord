@@ -1,0 +1,26 @@
+# Memlord domain / product terms (SCWS txt). Shared, safe to commit.
+# Format: word<TAB>tf<TAB>idf<TAB>attr   (higher tf + lower idf = stronger "keep as one word")
+# Private names (people, hosts, internal projects) go to dict_user.txt instead.
+美团	80.00	2.00	n
+入职	60.00	2.00	v
+京东云	80.00	2.00	n
+京东	50.00	3.00	n
+Memlord	80.00	2.00	n
+memlord	80.00	2.00	n
+AnyTLS	80.00	2.00	n
+anytls	80.00	2.00	n
+硅基流动	80.00	2.00	n
+embedding	40.00	3.00	n
+重排序	40.00	3.00	v
+向量检索	50.00	2.00	n
+混合检索	50.00	2.00	n
+全文检索	50.00	2.00	n
+购房	40.00	3.00	v
+预算	40.00	3.00	n
+公钥	40.00	3.00	n
+私钥	40.00	3.00	n
+工作机器	50.00	2.00	n
+开发环境	50.00	2.00	n
+zhparser	40.00	3.00	n
+pgvector	40.00	3.00	n
+后端	40.00	3.00	n

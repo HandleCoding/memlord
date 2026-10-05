@@ -89,6 +89,10 @@ cp .env.example .env
 docker compose up
 ```
 
+> 中文用户：默认 compose 已经用了带 zhparser 的 Postgres 镜像并挂好了中文词表，
+> 直接 `docker compose up` 即可。自己部署/换镜像前请先读
+> [中文全文检索（zhparser + 词表）](#-中文全文检索zhparser--词表)。
+
 ### HTTP server (multi-user, Web UI, OAuth)
 
 ```bash
@@ -189,6 +193,92 @@ Set `MEMLORD_BASE_URL` to your public URL and change `MEMLORD_OAUTH_JWT_SECRET` 
 
 ---
 
+## 🀄 中文全文检索（zhparser + 词表）
+
+Memlord 的混合检索 = 向量 KNN + Postgres 全文检索（FTS）。这个 fork 的 FTS 用
+[zhparser](https://github.com/amutu/zhparser)（SCWS 分词）做中文切词，
+`search_vector` 是 `chinese` 配置生成的 tsvector（标题权重 A、正文 B）。
+
+### 1. 必须用带 zhparser 的 Postgres 镜像
+
+迁移 `e7a1c2b3d4f5_zh_fts` 会执行 `CREATE EXTENSION zhparser`。普通的
+`postgres` / `pgvector/pgvector` 镜像**没有这个扩展，迁移会直接失败**。
+
+- 默认：`moailaozi/postgres-images:zhparser-pgvector-17`（zhparser + pgvector，PG 17，compose 里已固定 digest）
+- 自建镜像也行，只要同时装了 `zhparser` 和 `vector` 两个扩展；
+  下文路径里的 `17` 换成你的 PG 大版本。
+
+### 2. 中文词表：放在哪、怎么配
+
+词表都在 [`deploy/zhparser/dicts/`](deploy/zhparser/dicts)，格式是 SCWS txt：
+`词<TAB>tf<TAB>idf<TAB>词性`，`#` 开头为注释。tf 越高、idf 越低越倾向整词切出。
+
+| 文件 | 内容 | 是否提交到仓库 |
+|---|---|---|
+| `dict_chinese_extra.txt` | 通用词表：jieba 高频 8 万词 + THUOCL IT 词库 + 常用词（约 9.2 万条，~2 MB） | ✅ |
+| `dict_memlord_domain.txt` | 业务/产品词：美团、入职、京东云、AnyTLS、硅基流动、向量检索… | ✅，可直接 PR 补充 |
+| `dict_user.txt` | 你自己的私有词（人名、主机名、内部项目名），仓库里是空模板 | 模板 ✅；真实内容建议放仓库外 |
+
+接线方式（`docker-compose.yml` 已写好）：
+
+1. 把三个文件 bind-mount 到 Postgres 容器的 `/usr/share/postgresql/17/tsearch_data/`
+   （zhparser 只从这个目录按文件名加载，**不支持子目录/绝对路径**）；
+2. 用启动参数设置 GUC：
+   `postgres -c zhparser.extra_dicts=dict_chinese_extra.txt,dict_memlord_domain.txt,dict_user.txt`。
+
+私有词不想进 git：在 `.env` 里写
+`ZHPARSER_USER_DICT=/opt/memlord/zhparser-private/dict_user.txt`，compose 会改挂这个文件
+（文件必须存在，否则 Docker 会在宿主机上创建一个同名**目录**）。
+
+不用 compose / 想要自包含的 DB 镜像：
+
+```bash
+docker build -t memlord-postgres-zh deploy/zhparser   # 词表 + extra_dicts 打进镜像
+```
+
+已有数据库（不方便改启动参数）也可以：
+`ALTER SYSTEM SET zhparser.extra_dicts = 'dict_chinese_extra.txt,dict_memlord_domain.txt,dict_user.txt';`
+再重启 Postgres。
+
+### 3. 修改词表后
+
+词表在每个数据库连接**第一次分词时加载一次**，而 `search_vector` 是写入时算好的，所以改完要：
+
+```bash
+docker compose restart postgres            # 新连接才会读到新词表
+docker compose exec -T postgres psql -U postgres -d memlord < deploy/zhparser/reindex.sql
+docker compose restart memlord             # 应用连接池里的旧连接也要换掉
+```
+
+验证切词：
+
+```sql
+SELECT to_tsvector('chinese', '美团入职时间');
+-- 有词表： '入职':2 '时间':3 '美团':1
+```
+
+缺少某个词表文件时 zhparser 只在 Postgres 日志里打一行
+`zhparser: failed to add extra dict ...`，不会报错——切词效果变差时先看这个日志。
+
+### 4. 不挂词表会怎样
+
+zhparser 自带的 SCWS 词典很小，专名、公司名、新词经常切不出来。例如
+「美团入职时间」会被切成 `美/团/入/职/时间`。检索侧为了降噪会丢弃单字，于是查询只剩
+「时间」去匹配，目标记忆**根本进不了 FTS 候选**，反而是其他含「时间」的记忆被关键词加分，
+混合排序后正确结果掉到第 4 名之后。挂上词表后同一查询切成 `美团/入职/时间`，排第 1。
+
+服务仍能运行（只是 FTS 召回变差，向量检索不受影响），所以这个问题很容易被忽略。
+
+### 5. 为什么应用镜像（ghcr.io/…/memlord）里不带词表
+
+分词发生在**数据库里**：写入时 Postgres 用 `to_tsvector('chinese', …)` 生成
+`search_vector`，查询时用 `to_tsquery('chinese', …)`。词表只被 Postgres 进程里的 zhparser 读取，
+Python 应用进程完全用不到它。把词表打进应用镜像既不生效，还会让「改个业务词」变成
+「重新发布应用镜像」。所以词表跟着 Postgres 走：compose 挂载，或用
+`deploy/zhparser/Dockerfile` 打进 DB 镜像。
+
+---
+
 ## 🛠️ MCP Tools
 
 | Tool              | Description                                                             |
@@ -216,7 +306,7 @@ Workspace management (create, invite, join, leave) is handled via the Web UI.
 ## 💻 System Requirements
 
 - **Python** 3.12
-- **PostgreSQL** ≥ 15 with [pgvector](https://github.com/pgvector/pgvector) extension
+- **PostgreSQL** ≥ 15 with [pgvector](https://github.com/pgvector/pgvector) and [zhparser](https://github.com/amutu/zhparser) extensions (Chinese FTS, see above)
 - **uv** — Python package manager
 
 ---

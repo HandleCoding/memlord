@@ -1,0 +1,5 @@
+# Your own private terms: people's names, host names, internal project names...
+# This file is a template that ships empty. Either edit it in place, or keep a
+# private copy outside the repo and point ZHPARSER_USER_DICT at it (see README).
+# Format: word<TAB>tf<TAB>idf<TAB>attr      e.g.
+# 张三丰	80.00	2.00	n
