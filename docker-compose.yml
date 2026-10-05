@@ -23,7 +23,17 @@ services:
       start_period: 30s
 
   postgres:
-    image: moailaozi/postgres-images:zhparser-pgvector-17
+    # Chinese FTS needs a Postgres image that ships the zhparser extension
+    # (+ pgvector). Plain postgres/pgvector images will fail the zh_fts migration.
+    image: moailaozi/postgres-images:zhparser-pgvector-17@sha256:bb9c7f67ba9c96d8eb4d75a55f80618bfdab2b04bfb2497e6e603131d2b55cba
+    # zhparser.extra_dicts = extra SCWS word lists, file names relative to
+    # /usr/share/postgresql/17/tsearch_data (mounted below). Without them
+    # zhparser only has its small built-in dictionary and entities such as
+    # "美团入职时间" get cut into single characters -> poor keyword recall.
+    command:
+      - postgres
+      - -c
+      - zhparser.extra_dicts=dict_chinese_extra.txt,dict_memlord_domain.txt,dict_user.txt
     restart: unless-stopped
     environment:
       - PGDATA=/var/lib/postgresql/data/pgdata
@@ -32,6 +42,13 @@ services:
       - POSTGRES_DB=memlord
     volumes:
       - ./data/postgres:/var/lib/postgresql/data/pgdata
+      # Chinese word lists for zhparser (see deploy/zhparser/README.md).
+      # They live with Postgres, not in the memlord app image: segmentation
+      # happens inside the database (to_tsvector / to_tsquery).
+      - ./deploy/zhparser/dicts/dict_chinese_extra.txt:/usr/share/postgresql/17/tsearch_data/dict_chinese_extra.txt:ro
+      - ./deploy/zhparser/dicts/dict_memlord_domain.txt:/usr/share/postgresql/17/tsearch_data/dict_memlord_domain.txt:ro
+      # Private terms: override with ZHPARSER_USER_DICT=/path/outside/repo.txt in .env
+      - ${ZHPARSER_USER_DICT:-./deploy/zhparser/dicts/dict_user.txt}:/usr/share/postgresql/17/tsearch_data/dict_user.txt:ro
     ports:
       - "5433:5432"
     healthcheck:
