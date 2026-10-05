@@ -10,7 +10,7 @@ from sqlalchemy.orm import aliased
 
 from memlord.config import settings
 from memlord.dao.workspace import WorkspaceDao
-from memlord.embeddings import embed
+from memlord.embeddings import embed_pair
 from memlord.filters import not_expired
 from memlord.models import Memory, MemoryTag, Tag
 from memlord.models.workspace import Workspace
@@ -131,10 +131,11 @@ class MemoryDao:
         if memory_id is not None:
             return memory_id, False
 
-        vector = await embed(_embed_text(content, tags or set()))
+        pair = await embed_pair(_embed_text(content, tags or set()))
 
         if not force:
-            await self._check_near_duplicate(vector, workspace_id)
+            # Dedup always uses the local 384-d space (always present / comparable).
+            await self._check_near_duplicate(pair.local, workspace_id)
 
         memory_id = await self._s.scalar(
             insert(Memory)
@@ -142,7 +143,8 @@ class MemoryDao:
                 content=str(content),
                 memory_type=MemoryType(memory_type),
                 extra_data=metadata or {},
-                embedding=vector,
+                embedding=pair.local,
+                embedding_remote=pair.remote,
                 created_by=self._uid,
                 workspace_id=workspace_id,
                 name=name,
@@ -200,7 +202,9 @@ class MemoryDao:
             new_tags = set(tags) if tags is not _UNSET else await self._fetch_tag_names(memory_id)
             if content is not _UNSET:
                 values["content"] = content
-            values["embedding"] = await embed(_embed_text(new_content, new_tags))
+            pair = await embed_pair(_embed_text(new_content, new_tags))
+            values["embedding"] = pair.local
+            values["embedding_remote"] = pair.remote
 
         if values:
             final_name: str = await self._s.scalar(  # type: ignore[assignment]

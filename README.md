@@ -129,6 +129,36 @@ flowchart TD
 
 All settings use the `MEMLORD_` prefix. See [`.env.example`](.env.example) for the full list.
 
+
+### Optional remote embeddings
+
+By default Memlord embeds everything with the bundled ONNX model
+(`paraphrase-multilingual-MiniLM-L12-v2`, 384-d) — same as upstream.
+
+You can also point at an OpenAI-compatible embeddings API (e.g. SiliconFlow
+`BAAI/bge-m3`). Local vectors are **always** written; remote vectors go into the
+nullable `embedding_remote` column (1024-d). Store and search prefer remote when
+it is configured and healthy, and fall back to local on failure/timeout.
+
+```bash
+MEMLORD_EMBEDDING_PROVIDER=openai_compatible
+MEMLORD_EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1
+MEMLORD_EMBEDDING_API_KEY=sk-...
+MEMLORD_EMBEDDING_MODEL=BAAI/bge-m3
+MEMLORD_EMBEDDING_DIM=1024
+```
+
+After enabling remote on an existing database, run migrations then re-embed:
+
+```bash
+alembic upgrade head
+uv run python scripts/reembed.py
+```
+
+Changing `MEMLORD_EMBEDDING_DIM` requires a new migration (the pgvector column
+size is fixed).
+
+
 | Variable                   | Default                                                    | Description                                       |
 |----------------------------|------------------------------------------------------------|---------------------------------------------------|
 | `MEMLORD_DB_URL`           | `postgresql+asyncpg://postgres:postgres@localhost/memlord` | PostgreSQL connection URL                         |

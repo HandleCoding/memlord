@@ -7,6 +7,7 @@
 - Each SearchResult carries a ~160-char snippet centred on the first matched term.
 """
 
+import logging
 import re
 from datetime import datetime
 
@@ -15,14 +16,16 @@ from sqlalchemy import Float, bindparam, cast, func, literal, or_, select, text
 from sqlalchemy.dialects.postgresql import TSQUERY
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from memlord.config import settings
-from memlord.embeddings import embed
+from memlord.config import LOCAL_EMBEDDING_DIM, settings
+from memlord.embeddings import embed_local, embed_remote
 from memlord.filters import not_expired
 from memlord.models import Memory, MemoryTag, Tag
 from memlord.models.workspace import Workspace
 from memlord.schemas import MemoryType, SearchResult
 
 TS_CONFIG = "chinese"
+logger = logging.getLogger(__name__)
+
 SNIPPET_LEN = 160
 EXACT_NAME_BOOST = 1.0
 PARTIAL_NAME_BOOST = 0.02
@@ -166,16 +169,42 @@ async def hybrid_search(
         )
         name_rows = (await session.execute(name_q)).fetchall()
 
-    # Vector KNN via pgvector cosine distance
-    vector = await embed(query)
-    vec_param = bindparam("vec", type_=Vector(384))
-    distance = Memory.embedding.op("<=>", return_type=Float)(vec_param).label("distance")
+    # Vector KNN via pgvector cosine distance.
+    # Prefer remote embeddings when configured, the query remote call succeeds,
+    # and enough candidate memories already have embedding_remote populated.
+    emb_col = Memory.embedding
+    vec_dim = LOCAL_EMBEDDING_DIM
+    vector: list[float] | None = None
+
+    if settings.remote_embedding_configured:
+        total = await session.scalar(select(func.count()).select_from(Memory).where(*conditions))
+        remote_n = await session.scalar(
+            select(func.count())
+            .select_from(Memory)
+            .where(Memory.embedding_remote.isnot(None), *conditions)
+        )
+        coverage = (remote_n / total) if total else 0.0
+        if coverage >= settings.embedding_remote_min_coverage:
+            try:
+                vector = await embed_remote(query)
+                emb_col = Memory.embedding_remote
+                vec_dim = settings.embedding_dim
+            except Exception as exc:
+                logger.warning("remote query embedding failed, falling back to local: %s", exc)
+
+    if vector is None:
+        vector = await embed_local(query)
+        emb_col = Memory.embedding
+        vec_dim = LOCAL_EMBEDDING_DIM
+
+    vec_param = bindparam("vec", type_=Vector(vec_dim))
+    distance = emb_col.op("<=>", return_type=Float)(vec_param).label("distance")
     vec_rank = func.row_number().over(order_by=distance).label("vec_rank")
 
     vec_q = (
         select(*cols, distance, vec_rank)
         .join(Workspace, Memory.workspace_id == Workspace.id)
-        .where(Memory.embedding.isnot(None), *conditions)
+        .where(emb_col.isnot(None), *conditions)
         .order_by(distance)
         .limit(n)
     )
