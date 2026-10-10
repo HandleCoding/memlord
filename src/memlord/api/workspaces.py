@@ -192,7 +192,7 @@ async def export_memories(
                     Memory.extra_data.label("metadata"),
                 )
                 .where(Memory.workspace_id == workspace_id)
-                .order_by(Memory.created_at)
+                .order_by(Memory.created_at, Memory.id)
             )
         )
         .mappings()

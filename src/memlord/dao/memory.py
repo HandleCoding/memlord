@@ -14,6 +14,7 @@ from memlord.dao.workspace import WorkspaceDao
 from memlord.embeddings import embed_pair
 from memlord.filters import not_expired
 from memlord.models import Memory, MemoryTag, Tag
+from memlord.models.memory import content_sha256
 from memlord.models.workspace import Workspace
 from memlord.schemas import MemoryListItem, MemoryType
 from memlord.utils.dt import as_naive_utc, utcnow
@@ -135,6 +136,7 @@ class MemoryDao:
 
         memory_id = await self._s.scalar(
             select(Memory.id).where(
+                Memory.content_hash == content_sha256(content),
                 Memory.content == content,
                 Memory.workspace_id == workspace_id,
             )
@@ -152,6 +154,7 @@ class MemoryDao:
             insert(Memory)
             .values(
                 content=str(content),
+                content_hash=content_sha256(str(content)),
                 memory_type=MemoryType(memory_type),
                 extra_data=metadata or {},
                 embedding=pair.local,
@@ -227,6 +230,7 @@ class MemoryDao:
             new_tags = set(tags) if tags is not _UNSET else await self._fetch_tag_names(memory_id)
             if content is not _UNSET:
                 values["content"] = content
+                values["content_hash"] = content_sha256(content)
             pair = await embed_pair(_embed_text(new_content, new_tags))
             values["embedding"] = pair.local
             values["embedding_remote"] = pair.remote
@@ -364,7 +368,7 @@ class MemoryDao:
             "target workspace (with its policy_version) and delete the original",
         )
 
-        q = select(Memory.id, Memory.name, Memory.content).where(
+        q = select(Memory.id, Memory.name, Memory.content_hash).where(
             Memory.id == id, Memory.workspace_id == from_workspace_id
         )
 
@@ -375,7 +379,7 @@ class MemoryDao:
         duplicate = await self._s.scalar(
             select(Memory.id).where(
                 sa.or_(
-                    Memory.content == row["content"],
+                    Memory.content_hash == row["content_hash"],
                     Memory.name == row["name"],
                 ),
                 Memory.workspace_id == to_workspace_id,

@@ -1,3 +1,5 @@
+import hashlib
+
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
@@ -13,6 +15,9 @@ class Memory(Base):
     id = sa.Column(sa.Integer, primary_key=True, autoincrement=True)
     name = sa.Column(sa.Text, nullable=False)
     content = sa.Column(sa.Text, nullable=False)
+    # sha256 of the UTF-8 content. Uniqueness is enforced on this instead of the
+    # raw text: a btree row is capped at ~2.7KB, so long content cannot be indexed.
+    content_hash = sa.Column(sa.LargeBinary(32), nullable=False)
     created_by = sa.Column(
         sa.Integer, sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
@@ -46,7 +51,9 @@ class Memory(Base):
     )
 
     __table_args__ = (
-        sa.UniqueConstraint("content", "workspace_id", name="uq_memories_content_workspace"),
+        sa.UniqueConstraint(
+            "workspace_id", "content_hash", name="uq_memories_content_hash_workspace"
+        ),
         sa.UniqueConstraint("name", "workspace_id", name="uq_memories_name_workspace"),
         sa.Index("ix_memories_search_vector", "search_vector", postgresql_using="gin"),
         sa.Index(
@@ -64,3 +71,8 @@ class Memory(Base):
             postgresql_ops={"embedding_remote": "vector_cosine_ops"},
         ),
     )
+
+
+def content_sha256(content: str) -> bytes:
+    """Digest stored in memories.content_hash (matches SQL sha256(convert_to(content, 'UTF8')))."""
+    return hashlib.sha256(content.encode("utf-8")).digest()
